@@ -1,7 +1,7 @@
 // -*- c-basic-offset: 4 -*-
 #ifndef CLICK_KERNELTUN_HH
 #define CLICK_KERNELTUN_HH
-#include <click/element.hh>
+#include <click/batchelement.hh>
 #include <click/etheraddress.hh>
 #include <click/task.hh>
 #include <click/notifier.hh>
@@ -104,7 +104,7 @@ packets, not IP-in-Ethernet packets.
 
 FromDevice.u, ToDevice.u, KernelTap, ifconfig(8) */
 
-class KernelTun : public Element { public:
+class KernelTun : public BatchElement { public:
 
     KernelTun() CLICK_COLD;
     ~KernelTun() CLICK_COLD;
@@ -124,10 +124,13 @@ class KernelTun : public Element { public:
     
     bool get_spawning_threads(Bitvector &, bool) override;
 
-    void selected(int fd, int mask);
+    void selected(int fd, int mask) override;
 
-    void push(int port, Packet *);
-    bool run_task(Task *);
+    void push(int port, Packet *) override;
+#if HAVE_BATCH
+    void push_batch(int port, PacketBatch *) override;
+#endif
+    bool run_task(Task *) override;
 
   private:
 
@@ -165,7 +168,8 @@ class KernelTun : public Element { public:
     int alloc_tun(ErrorHandler *);
     int setup_tun(ErrorHandler *);
     int updown(IPAddress, IPAddress, ErrorHandler *);
-    bool one_selected(const Timestamp &now);
+    bool one_selected(const Timestamp &now, WritablePacket* &p);
+    void process(Packet* p);
 
     friend class KernelTap;
 
