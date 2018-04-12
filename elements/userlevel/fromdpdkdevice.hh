@@ -124,6 +124,8 @@ public:
     }
     bool can_live_reconfigure() const { return false; }
 
+    void* cast(const char *name) CLICK_COLD;
+
     int configure(Vector<String> &, ErrorHandler *) CLICK_COLD;
     int initialize(ErrorHandler *) CLICK_COLD;
     void add_handlers() CLICK_COLD;
@@ -150,7 +152,6 @@ private:
     };
 
     DPDKDevice* _dev;
-    bool _active;
 };
 
 CLICK_ENDDECLS

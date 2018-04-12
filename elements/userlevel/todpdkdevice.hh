@@ -128,6 +128,8 @@ public:
     }
     bool can_live_reconfigure() const { return false; }
 
+    void* cast(const char *name) CLICK_COLD;
+
     int configure(Vector<String> &, ErrorHandler *) CLICK_COLD;
     int initialize(ErrorHandler *) CLICK_COLD;
 
@@ -150,7 +152,7 @@ private:
 
     /* TXInternalQueue is a ring of DPDK buffers pointers (rte_mbuf *) awaiting
      * to be sent. It is used as an internal buffer to be passed to DPDK device
-	 * queue.
+     * queue.
      * index is the index of the first valid packets awaiting to be sent, while
      * nr_pending is the number of packets. index + nr_pending may be greater
      * than _internal_tx_queue_size but index should be wrapped-around. */

@@ -3,8 +3,8 @@
  * fromdpdkdevice.{cc,hh} -- element reads packets live from network via
  * Intel's DPDK
  *
- * Copyright (c) 2014-2015 Cyril Soldani, University of LiÃ¨ge
- * Copyright (c) 2016 Tom Barbette, University of LiÃ¨ge
+ * Copyright (c) 2014-2015 Cyril Soldani, University of Liège
+ * Copyright (c) 2016 Tom Barbette, University of Liège
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -30,7 +30,7 @@
 CLICK_DECLS
 
 FromDPDKDevice::FromDPDKDevice() :
-    _dev(0), _active(true)
+    _dev(0)
 {
 	#if HAVE_BATCH
 		in_batch_mode = BATCH_MODE_YES;
@@ -41,6 +41,15 @@ FromDPDKDevice::FromDPDKDevice() :
 
 FromDPDKDevice::~FromDPDKDevice()
 {
+}
+
+void*
+FromDPDKDevice::cast(const char* name)
+{
+    if (strcmp(name, "DPDKDevice") == 0)
+	return this->_dev;
+    else
+	return QueueDevice::cast(name);
 }
 
 int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
@@ -70,6 +79,14 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
 
     if (_use_numa) {
         numa_node = DPDKDevice::get_port_numa_node(_dev->port_id);
+    }
+
+    if (_dev->mode == DEVICE_MODE_KNI) {
+        click_chatter("%p{element} : KNI!!!!",this);
+        firstqueue = 0;
+        n_queues = 1;
+        configure_rx(numa_node,1,1,errh);
+        return 0;
     }
 
     int r;
@@ -105,9 +122,11 @@ int FromDPDKDevice::initialize(ErrorHandler *errh)
     ret = initialize_rx(errh);
     if (ret != 0) return ret;
 
-    for (unsigned i = firstqueue; i <= lastqueue; i++) {
-        ret = _dev->add_rx_queue(i , _promisc, ndesc, errh);
-        if (ret != 0) return ret;
+    if (_dev->mode == DEVICE_MODE_PHYS) {
+        for (unsigned i = firstqueue; i <= lastqueue; i++) {
+            ret = _dev->add_rx_queue(i , _promisc, ndesc, errh);
+            if (ret != 0) return ret;
+        }
     }
 
     ret = initialize_tasks(_active,errh);
@@ -145,7 +164,16 @@ bool FromDPDKDevice::run_task(Task *t)
          PacketBatch* head = 0;
          WritablePacket *last;
 #endif
-        unsigned n = rte_eth_rx_burst(_dev->port_id, iqueue, pkts, _burst);
+        unsigned n;
+        if (_dev->mode == DEVICE_MODE_PHYS) {
+            n = rte_eth_rx_burst(_dev->port_id, iqueue, pkts, _burst);
+        } else {
+            n = rte_kni_rx_burst(_dev->kni, pkts, _burst);
+        }
+        if (n > _burst) {
+            click_chatter("%p{element} : Problem receiving packets. Received %u packets but is only asked for %u!",this,n,_burst);
+            return false;
+        }
         for (unsigned i = 0; i < n; ++i) {
             unsigned char* data = rte_pktmbuf_mtod(pkts[i], unsigned char *);
             rte_prefetch0(data);
@@ -192,6 +220,11 @@ bool FromDPDKDevice::run_task(Task *t)
         if (n) {
             add_count(n);
             ret = 1;
+        }
+        if (_dev->mode == DEVICE_MODE_KNI) {
+            ret = rte_kni_handle_request(_dev->kni);
+            if (ret != 0)
+                click_chatter("handle request error");
         }
     }
 

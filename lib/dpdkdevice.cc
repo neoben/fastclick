@@ -20,14 +20,15 @@
 #include <click/dpdkdevice.hh>
 #include <click/element.hh>
 #include <click/userutils.hh>
+#include <click/etheraddress.hh>
 #include <rte_errno.h>
 
 CLICK_DECLS
 
-DPDKDevice::DPDKDevice() : port_id(-1), info() {
+DPDKDevice::DPDKDevice() : mode(DEVICE_MODE_PHYS), port_id(-1), info() {
 }
 
-DPDKDevice::DPDKDevice(unsigned port_id) : port_id(port_id) {
+DPDKDevice::DPDKDevice(unsigned port_id, DPDKDeviceMode mode) : mode(mode), port_id(port_id) {
 };
 
 uint16_t DPDKDevice::get_device_vendor_id()
@@ -220,6 +221,14 @@ int DPDKDevice::initialize_device(ErrorHandler *errh)
     struct rte_eth_conf dev_conf;
     struct rte_eth_dev_info dev_info;
     memset(&dev_conf, 0, sizeof dev_conf);
+
+
+    if (mode == DEVICE_MODE_KNI) {
+        kni = kni_alloc(port_id & PORT_KNI_MASK, kni_name.c_str());
+        if (kni == 0)
+            return errh->error("Could not initialize KNI !");
+        return 0;
+    }
 
     rte_eth_dev_info_get(port_id, &dev_info);
 
@@ -424,6 +433,65 @@ int DPDKDevice::add_tx_queue(unsigned &queue_id, unsigned n_desc,
     return add_queue(DPDKDevice::TX, queue_id, false, n_desc, errh);
 }
 
+
+/* Callback for request of changing MTU */
+int kni_change_mtu(uint16_t port_id, unsigned new_mtu)
+{
+}
+
+/* Callback for request of configuring network interface up/down */
+int kni_config_network_interface(uint16_t port_id, uint8_t if_up)
+{
+    int ret = 0;
+
+    if (port_id >= rte_eth_dev_count() || port_id >= RTE_MAX_ETHPORTS) {
+        return -EINVAL;
+    }
+
+    click_chatter("Configure network interface of %d %s\n",
+                    port_id, if_up ? "up" : "down");
+
+    if (if_up != 0) { /* Configure network interface up */
+        rte_eth_dev_stop(port_id);
+        ret = rte_eth_dev_start(port_id);
+    } else /* Configure network interface down */
+        rte_eth_dev_stop(port_id);
+
+    if (ret < 0)
+        click_chatter("Failed to start port %d\n", port_id);
+
+    return ret;
+}
+
+rte_kni* DPDKDevice::kni_alloc(uint8_t port_id, const char* kni_name)
+{
+    uint8_t i;
+    struct rte_kni *kni;
+    struct rte_kni_conf conf;
+    struct rte_kni_ops ops;
+    struct rte_eth_dev_info dev_info;
+    int ret;
+
+    memset(&conf, 0, sizeof(conf));
+    strncpy(conf.name, kni_name, RTE_KNI_NAMESIZE);
+    conf.group_id = (uint16_t)port_id;
+    conf.mbuf_size = DPDKDevice::MBUF_SIZE; //MAX_PACKET_SZ constant in kni example
+
+//    memset(&dev_info, 0, sizeof(dev_info));
+//    rte_eth_dev_info_get(port_id, &dev_info);
+    conf.addr = {0,0,0,0}; //dev_info.pci_dev->addr;
+    conf.id = {0,0,0,0,0}; //dev_info.pci_dev->id;
+
+    memset(&ops, 0, sizeof(ops));
+    ops.port_id = port_id;
+    ops.change_mtu = kni_change_mtu;
+    ops.config_network_if = &kni_config_network_interface;
+
+    kni = rte_kni_alloc(DPDKDevice::get_mpool(rte_socket_id()), &conf, &ops);
+
+    return kni;
+}
+
 int DPDKDevice::static_initialize(ErrorHandler* errh) {
 #if HAVE_DPDK_PACKET_POOL
     if (!dpdk_enabled) {
@@ -469,6 +537,9 @@ int DPDKDevice::initialize(ErrorHandler *errh)
     if (err != 0)
         return err;
 
+    if (DPDKDevice::_n_kni > 0)
+        rte_kni_init(DPDKDevice::_n_kni);
+
     if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
         for (HashTable<unsigned, DPDKDevice>::iterator it = _devs.begin();
             it != _devs.end(); ++it) {
@@ -493,7 +564,10 @@ DPDKDeviceArg::parse(const String &str, DPDKDevice* &result, const ArgContext &c
 {
     int port_id;
 
-    if (!IntArg().parse(str, port_id)) {
+    if (str.starts_with("kni:")) {
+        result = DPDKDevice::get_kni_device(str.substring(4));
+        return true;
+    } else if (!IntArg().parse(str, port_id)) {
        //Try parsing a ffff:ff:ff.f format. Code adapted from EtherAddressArg::parse
         unsigned data[4];
         int d = 0, p = 0;
@@ -539,8 +613,7 @@ DPDKDeviceArg::parse(const String &str, DPDKDevice* &result, const ArgContext &c
 
     if (port_id >= 0 && port_id < rte_eth_dev_count()) {
         result = DPDKDevice::get_device(port_id);
-    }
-    else {
+    } else {
         ctx.error("Cannot resolve PCI address to DPDK device");
         return false;
     }
@@ -617,6 +690,10 @@ DPDKRing::parse(Args* args) {
     return 0;
 }
 
+void DPDKDevice::print_errno() {
+	click_chatter("DPDK Errno %d : %s",rte_errno, rte_strerror(rte_errno));
+}
+
 #if HAVE_DPDK_PACKET_POOL
 /**
  * Must be able to fill the packet data pool,
@@ -657,5 +734,7 @@ HashTable<unsigned, DPDKDevice> DPDKDevice::_devs;
 struct rte_mempool** DPDKDevice::_pktmbuf_pools;
 int DPDKDevice::_nr_pktmbuf_pools;
 bool DPDKDevice::no_more_buffer_msg_printed = false;
+
+unsigned DPDKDevice::_n_kni = 0;
 
 CLICK_ENDDECLS

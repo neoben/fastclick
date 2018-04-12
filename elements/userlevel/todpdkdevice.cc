@@ -1,8 +1,8 @@
 /*
  * todpdkdevice.{cc,hh} -- element sends packets to network via Intel's DPDK
  *
- * Copyright (c) 2014-2015 Cyril Soldani, University of LiÃ¨ge
- * Copyright (c) 2015 Tom Barbette, University of LiÃ¨ge
+ * Copyright (c) 2014-2015 Cyril Soldani, University of Liège
+ * Copyright (c) 2015 Tom Barbette, University of Liège
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -38,6 +38,15 @@ ToDPDKDevice::~ToDPDKDevice()
 {
 }
 
+void*
+ToDPDKDevice::cast(const char* name)
+{
+    if (strcmp(name, "DPDKDevice") == 0)
+        return this->_dev;
+    else
+        return QueueDevice::cast(name);
+}
+
 int ToDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
 {
     int maxqueues = 128;
@@ -49,11 +58,18 @@ int ToDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
         .read("NDESC",ndesc)
         .complete() < 0)
             return -1;
+
     if (!DPDKDeviceArg::parse(dev, _dev)) {
         if (allow_nonexistent)
             return 0;
         else
             return errh->error("%s : Unknown or invalid PORT", dev.c_str());
+    }
+
+    if (_dev->mode == DEVICE_MODE_KNI) {
+        firstqueue = 0;
+        n_queues = 1;
+        maxqueues = 1;
     }
 
     //TODO : If user put multiple ToDPDKDevice with the same port and without the QUEUE parameter, try to share the available queues among them
@@ -71,10 +87,14 @@ int ToDPDKDevice::initialize(ErrorHandler *errh)
     if (ret != 0)
         return ret;
 
-    for (unsigned i = 0; i < n_queues; i++) {
-        ret = _dev->add_tx_queue(i, ndesc , errh);
-        if (ret != 0) return ret;    }
+    if (_dev->mode == DEVICE_MODE_PHYS) {
+        for (unsigned i = 0; i < n_queues; i++) {
+            ret = _dev->add_tx_queue(i, ndesc , errh);
+            if (ret != 0) return ret;
+        }
+    } else {
 
+    }
 #if HAVE_BATCH
     if (batch_mode() == BATCH_MODE_YES) {
         if (_burst < 0)
@@ -203,8 +223,17 @@ void ToDPDKDevice::flush_internal_tx_queue(TXInternalQueue &iqueue) {
             // The sub_burst wraps around the ring
             sub_burst = _internal_tx_queue_size - iqueue.index;
         //Todo : if there is multiple queue assigned to this thread, send on all of them
-        r = rte_eth_tx_burst(_dev->port_id, queue_for_thisthread_begin(), &iqueue.pkts[iqueue.index],
-                             sub_burst);
+
+        if (_dev->mode == DEVICE_MODE_PHYS) {
+            r = rte_eth_tx_burst(_dev->port_id, queue_for_thisthread_begin(), &iqueue.pkts[iqueue.index],
+                                  sub_burst);
+        } else {
+            r = rte_kni_tx_burst(_dev->kni, &iqueue.pkts[iqueue.index], sub_burst);
+        }
+        if (r > sub_burst) {
+            click_chatter("%p{element} : Problem sending packets ! Sent %u packets but I only tried to send %u !",this, r, sub_burst);
+            return;
+        }
         iqueue.nr_pending -= r;
         iqueue.index += r;
 

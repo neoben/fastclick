@@ -20,18 +20,22 @@
 #include <rte_mbuf.h>
 #include <rte_mempool.h>
 #include <rte_pci.h>
+#include <rte_kni.h>
+#include <rte_log.h>
 #include <rte_version.h>
-
+#include <rte_errno.h>
 #if RTE_VERSION >= RTE_VERSION_NUM(17,11,0,0)
     #include <rte_bus_pci.h>
 #endif
-
 #include <click/packet.hh>
 #include <click/error.hh>
 #include <click/hashtable.hh>
 #include <click/vector.hh>
 #include <click/args.hh>
 #include <click/etheraddress.hh>
+
+/* Macros for printing using RTE_LOG */
+#define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 
 CLICK_DECLS
 class DPDKDeviceArg;
@@ -44,13 +48,20 @@ typedef uint32_t counter_t;
 
 extern bool dpdk_enabled;
 
+typedef enum DPDKDeviceMode_t {DEVICE_MODE_PHYS,DEVICE_MODE_KNI} DPDKDeviceMode;
+
 class DPDKDevice {
 public:
 
+    DPDKDeviceMode mode;
     unsigned port_id;
 
+    #define PORT_KNI_MASK 0xff
+    rte_kni* kni; //Set only if mode is KNI
+    String kni_name;
+
     DPDKDevice();
-    DPDKDevice(unsigned port_id);
+    DPDKDevice(unsigned port_id, DPDKDeviceMode mode);
 
     int add_rx_queue(unsigned &queue_id, bool promisc,
                              unsigned n_desc, ErrorHandler *errh) CLICK_COLD;
@@ -122,6 +133,9 @@ public:
 
     static struct rte_mempool** _pktmbuf_pools;
 
+    static void add_handlers(Element* e, bool is_tx);
+
+    static void print_errno();
 private:
 
     enum Dir { RX, TX };
@@ -167,6 +181,10 @@ private:
     static int _nr_pktmbuf_pools;
     static bool no_more_buffer_msg_printed;
 
+    static unsigned _n_kni;
+
+    static rte_kni* kni_alloc(uint8_t port_id, const char* kni_name);
+
     int initialize_device(ErrorHandler *errh) CLICK_COLD;
     int add_queue(Dir dir, unsigned &queue_id, bool promisc,
                    unsigned n_desc, ErrorHandler *errh) CLICK_COLD;
@@ -174,7 +192,20 @@ private:
     static bool alloc_pktmbufs() CLICK_COLD;
 
     static DPDKDevice* get_device(unsigned port_id) {
-       return &(_devs.find_insert(port_id, DPDKDevice(port_id)).value());
+        DPDKDevice* dev = &(_devs.find_insert(port_id, DPDKDevice(port_id, DEVICE_MODE_PHYS)).value());
+        return dev;
+    }
+
+    static DPDKDevice* get_kni_device(String kni_name) {
+        for (HashTable<unsigned, DPDKDevice>::iterator it = _devs.begin();
+             it != _devs.end(); ++it) {
+            if (it.value().kni_name == kni_name)
+                return &it.value();
+        }
+        unsigned port_id = (_n_kni ++) + (PORT_KNI_MASK + 1);
+        DPDKDevice* dev = &(_devs.find_insert(port_id, DPDKDevice(port_id, DEVICE_MODE_KNI)).value());
+        dev->kni_name = kni_name;
+        return dev;
     }
 
     static int get_port_from_pci(uint16_t domain, uint8_t bus, uint8_t dev_id, uint8_t function) {
